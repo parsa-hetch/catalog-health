@@ -7,7 +7,7 @@ import {
 } from "react-router";
 
 import { authenticate } from "../shopify.server";
-import prisma from "../db.server";
+import { prisma } from "../db.server";
 
 const DEV_STORE = "catalog-health-dev-tzeqhgzu.myshopify.com";
 
@@ -97,9 +97,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
       .slice()
       .sort((a, b) => {
         const severityWeight: Record<string, number> = {
-          CRITICAL: 3,
-          HIGH: 2,
-          MEDIUM: 1,
+          CRITICAL: 4,
+          HIGH: 3,
+          MEDIUM: 2,
+          LOW: 1,
         };
 
         const severityDifference =
@@ -145,28 +146,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   const formData = await request.formData();
   const mode = String(formData.get("mode") ?? "seed");
 
-  /*
-   * ---------------------------------------------------------
-   * RESET
-   * ---------------------------------------------------------
-   *
-   * New seeded products are identified by a dedicated tag.
-   *
-   * We also clean up the products created by the previous
-   * broken seed implementation:
-   *
-   * - "Catalog Test Product ..."
-   * - "Item 271" ... "Item 280"
-   *
-   * The database scan history is cleared as well.
-   */
-
   if (mode === "reset") {
     let deleted = 0;
 
     const deleteProductsByQuery = async (query: string) => {
       while (true) {
-        const response = await admin.graphql(`#graphql
+        const response = await admin.graphql(
+          `#graphql
           query SeedProducts($query: String!) {
             products(
               first: 50
@@ -178,16 +164,16 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               }
             }
           }
-        `, {
-          variables: {
-            query,
+        `,
+          {
+            variables: {
+              query,
+            },
           },
-        });
+        );
 
         const data = await response.json();
-
-        const products =
-          data.data?.products?.nodes ?? [];
+        const products = data.data?.products?.nodes ?? [];
 
         if (products.length === 0) {
           break;
@@ -216,7 +202,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           );
 
           const deleteData = await deleteResponse.json();
-
           const errors: GraphQLUserError[] =
             deleteData.data?.productDelete?.userErrors ?? [];
 
@@ -230,33 +215,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       }
     };
 
-    /*
-     * Delete all products created by the new seed.
-     */
-    await deleteProductsByQuery(
-      `tag:${SEED_TAG}`,
-    );
+    await deleteProductsByQuery(`tag:${SEED_TAG}`);
+    await deleteProductsByQuery(`title:${SEED_PREFIX}`);
 
-    /*
-     * Delete products created by the old seed implementation.
-     */
-    await deleteProductsByQuery(
-      `title:${SEED_PREFIX}`,
-    );
-
-    /*
-     * Delete the old short-title test products.
-     */
     for (let i = 271; i <= 280; i++) {
-      await deleteProductsByQuery(
-        `title:"Item ${i}"`,
-      );
+      await deleteProductsByQuery(`title:"Item ${i}"`);
     }
 
-    /*
-     * Remove old scan history because the catalog has changed
-     * completely after a reset.
-     */
     await prisma.scan.deleteMany({
       where: {
         shop: session.shop,
@@ -271,39 +236,12 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
-  /*
-   * ---------------------------------------------------------
-   * SEED
-   * ---------------------------------------------------------
-   *
-   * We intentionally create only 10 products per request.
-   *
-   * Each product is created with productSet, which lets us
-   * define:
-   *
-   * - product title
-   * - description
-   * - status
-   * - seed tag
-   * - product image
-   * - variant price
-   * - variant SKU
-   * - inventory tracking
-   * - inventory quantity
-   *
-   * This avoids the previous multi-mutation flow that caused
-   * inventory and variant inconsistencies.
-   */
-
   const start = Math.max(
     0,
     Number(formData.get("start") ?? 0),
   );
 
-  if (
-    !Number.isFinite(start) ||
-    start >= SEED_TOTAL
-  ) {
+  if (!Number.isFinite(start) || start >= SEED_TOTAL) {
     return Response.json({
       success: true,
       created: 0,
@@ -314,30 +252,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     });
   }
 
-  /*
-   * Never start a brand-new seed on top of an existing one.
-   * This prevents accidental duplicate catalogs.
-   */
   if (start === 0) {
-    const existingSeedResponse =
-      await admin.graphql(`#graphql
-        query ExistingSeedProducts {
-          products(
-            first: 1
-            query: "tag:${SEED_TAG}"
-          ) {
-            nodes {
-              id
-            }
+    const existingSeedResponse = await admin.graphql(`#graphql
+      query ExistingSeedProducts {
+        products(
+          first: 1
+          query: "tag:${SEED_TAG}"
+        ) {
+          nodes {
+            id
           }
         }
-      `);
+      }
+    `);
 
-    const existingSeedData =
-      await existingSeedResponse.json();
-
-    const existingSeedProducts =
-      existingSeedData.data?.products?.nodes ?? [];
+    const existingSeedData = await existingSeedResponse.json();
+    const existingSeedProducts = existingSeedData.data?.products?.nodes ?? [];
 
     if (existingSeedProducts.length > 0) {
       return Response.json(
@@ -352,25 +282,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  const end = Math.min(
-    start + SEED_BATCH_SIZE,
-    SEED_TOTAL,
-  );
-
+  const end = Math.min(start + SEED_BATCH_SIZE, SEED_TOTAL);
   let created = 0;
   let failed = 0;
-
-  /*
-   * ---------------------------------------------------------
-   * LOCATION
-   * ---------------------------------------------------------
-   *
-   * We only query the location ID.
-   *
-   * Shopify allows the Location ID to be queried with
-   * inventory access scopes, so we don't need to add
-   * read_locations just for this seed utility.
-   */
 
   const locationsResponse = await admin.graphql(`#graphql
     query SeedLocations {
@@ -382,137 +296,48 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   `);
 
-  const locationsData =
-    await locationsResponse.json();
-
-  const inventoryLocation =
-    locationsData.data?.locations?.nodes?.[0];
+  const locationsData = await locationsResponse.json();
+  const inventoryLocation = locationsData.data?.locations?.nodes?.[0];
 
   if (!inventoryLocation?.id) {
     return Response.json(
       {
         success: false,
         mode: "seed",
-        error:
-          "No Shopify inventory location was found.",
+        error: "No Shopify inventory location was found.",
       },
       { status: 500 },
     );
   }
 
-  /*
-   * ---------------------------------------------------------
-   * PRODUCT CREATION
-   * ---------------------------------------------------------
-   */
+  for (let i = start + 1; i <= end; i++) {
+    const missingDescription = i >= 151 && i <= 190;
+    const missingSku = i >= 191 && i <= 215;
+    const missingPrice = i >= 216 && i <= 235;
+    const outOfStock = i >= 236 && i <= 255;
+    const missingImage = i >= 256 && i <= 270;
+    const shortTitle = i >= 271 && i <= 280;
+    const draft = i >= 281 && i <= 290;
+    const archived = i >= 291 && i <= 295;
+    const mixedDefect = i >= 296;
 
-  for (
-    let i = start + 1;
-    i <= end;
-    i++
-  ) {
-    /*
-     * Distribution:
-     *
-     * 01–150  mostly healthy products
-     * 151–190 missing descriptions
-     * 191–215 missing SKU
-     * 216–235 missing price
-     * 236–255 out of stock
-     * 256–270 missing image
-     * 271–280 short titles
-     * 281–290 draft
-     * 291–295 archived
-     * 296–300 mixed defects
-     */
-
-    const missingDescription =
-      i >= 151 && i <= 190;
-
-    const missingSku =
-      i >= 191 && i <= 215;
-
-    const missingPrice =
-      i >= 216 && i <= 235;
-
-    const outOfStock =
-      i >= 236 && i <= 255;
-
-    const missingImage =
-      i >= 256 && i <= 270;
-
-    const shortTitle =
-      i >= 271 && i <= 280;
-
-    const draft =
-      i >= 281 && i <= 290;
-
-    const archived =
-      i >= 291 && i <= 295;
-
-    const mixedDefect =
-      i >= 296;
-
-    const title = shortTitle
-      ? `Item ${i}`
-      : `${SEED_PREFIX} ${i}`;
-
+    const title = shortTitle ? `Item ${i}` : `${SEED_PREFIX} ${i}`;
     const descriptionHtml =
       missingDescription || mixedDefect
         ? ""
         : "<p>A realistic test product created for Catalog Health.</p>";
 
-    const status = archived
-      ? "ARCHIVED"
-      : draft
-        ? "DRAFT"
-        : "ACTIVE";
+    const status = archived ? "ARCHIVED" : draft ? "DRAFT" : "ACTIVE";
 
-    /*
-     * Mixed defects deliberately distribute different
-     * problems across the final products.
-     */
+    const shouldHavePrice = !missingPrice && !(mixedDefect && i % 3 === 0);
+    const shouldHaveSku = !missingSku && !(mixedDefect && i % 3 === 1);
+    const shouldHaveInventory = !outOfStock && !(mixedDefect && i % 3 === 2);
+    const shouldHaveImage = !missingImage && !(mixedDefect && i % 2 === 0);
 
-    const shouldHavePrice =
-      !missingPrice &&
-      !(mixedDefect && i % 3 === 0);
+    const price = shouldHavePrice ? 49 + ((i * 17) % 180) : undefined;
+    const sku = shouldHaveSku ? `CAT-${String(i).padStart(4, "0")}` : undefined;
+    const inventoryQuantity = shouldHaveInventory ? 10 + (i % 40) : 0;
 
-    const shouldHaveSku =
-      !missingSku &&
-      !(mixedDefect && i % 3 === 1);
-
-    const shouldHaveInventory =
-      !outOfStock &&
-      !(mixedDefect && i % 3 === 2);
-
-    const shouldHaveImage =
-      !missingImage &&
-      !(mixedDefect && i % 2 === 0);
-
-    const price = shouldHavePrice
-      ? 49 + ((i * 17) % 180)
-      : undefined;
-
-    const sku = shouldHaveSku
-      ? `CAT-${String(i).padStart(4, "0")}`
-      : undefined;
-
-    /*
-     * A tracked product with zero available inventory is
-     * intentionally used for out-of-stock cases.
-     */
-    const inventoryQuantity =
-      shouldHaveInventory
-        ? 10 + (i % 40)
-        : 0;
-
-    /*
-     * productSet requires explicit product option values
-     * when variants are supplied.
-     *
-     * This is Shopify's standard representation for a
-     * single/default variant.
-     */
     const variant: Record<string, unknown> = {
       optionValues: [
         {
@@ -520,16 +345,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           name: "Default Title",
         },
       ],
-
-      /*
-       * Critical:
-       * inventory quantities are only reliable here when
-       * inventory tracking is enabled.
-       */
       inventoryItem: {
         tracked: true,
       },
-
       inventoryQuantities: [
         {
           locationId: inventoryLocation.id,
@@ -539,35 +357,19 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       ],
     };
 
-    /*
-     * Healthy / non-missing-price products receive a real
-     * price. Products intentionally missing price omit the
-     * field so Shopify keeps the variant at its zero/default
-     * price state, which our rule engine can flag.
-     */
     if (price !== undefined) {
       variant.price = price;
     }
 
-    /*
-     * Missing-SKU products intentionally omit sku.
-     */
     if (sku !== undefined) {
       variant.sku = sku;
     }
 
-    /*
-     * Build the product input.
-     */
     const productSet: Record<string, unknown> = {
       title,
-
       descriptionHtml,
-
       status,
-
       tags: [SEED_TAG],
-
       productOptions: [
         {
           name: "Title",
@@ -579,16 +381,9 @@ export const action = async ({ request }: ActionFunctionArgs) => {
           ],
         },
       ],
-
       variants: [variant],
     };
 
-    /*
-     * Only products that should have an image receive a file.
-     *
-     * The missing-image products intentionally omit files
-     * completely.
-     */
     if (shouldHaveImage) {
       productSet.files = [
         {
@@ -614,7 +409,6 @@ export const action = async ({ request }: ActionFunctionArgs) => {
               product {
                 id
               }
-
               userErrors {
                 field
                 message
@@ -630,29 +424,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
         },
       );
 
-      const createData =
-        await createResponse.json();
-
-      
-
+      const createData = await createResponse.json();
       const userErrors: GraphQLUserError[] =
-        createData.data?.productSet?.userErrors ??
-        [];
+        createData.data?.productSet?.userErrors ?? [];
 
-      if (
-  userErrors.length > 0 ||
-  !createData.data?.productSet?.product
-) {
+      if (userErrors.length > 0 || !createData.data?.productSet?.product) {
         failed++;
         continue;
       }
 
       created++;
     } catch {
-      /*
-       * One failed product should not kill the entire
-       * 300-product seed.
-       */
       failed++;
     }
   }
@@ -679,49 +461,29 @@ export default function Index() {
     isDevStore,
   } = useLoaderData<typeof loader>();
 
-  const seedFetcher =
-    useFetcher<SeedResult>();
+  const seedFetcher = useFetcher<SeedResult>();
+  const resetFetcher = useFetcher<SeedResult>();
 
-  const resetFetcher =
-    useFetcher<SeedResult>();
+  const [seedStart, setSeedStart] = useState(0);
+  const [seedTotalCreated, setSeedTotalCreated] = useState(0);
 
-  const [seedStart, setSeedStart] =
-    useState(0);
+  const isSeeding = seedFetcher.state !== "idle";
+  const isResetting = resetFetcher.state !== "idle";
 
-  const [seedTotalCreated, setSeedTotalCreated] =
-    useState(0);
-
-  const isSeeding =
-    seedFetcher.state !== "idle";
-
-  const isResetting =
-    resetFetcher.state !== "idle";
-
-  /*
-   * Automatically continue the seed process.
-   */
   useEffect(() => {
     const result = seedFetcher.data;
 
-    if (
-      !result?.success ||
-      result.mode !== "seed" ||
-      result.complete
-    ) {
+    if (!result?.success || result.mode !== "seed" || result.complete) {
       return;
     }
 
-    if (
-      typeof result.nextStart !== "number"
-    ) {
+    if (typeof result.nextStart !== "number") {
       return;
     }
 
     setSeedStart(result.nextStart);
-
     setSeedTotalCreated(
-      (current) =>
-        current + (result.created ?? 0),
+      (current) => current + (result.created ?? 0),
     );
 
     seedFetcher.submit(
@@ -736,20 +498,14 @@ export default function Index() {
   }, [seedFetcher.data]);
 
   const formattedScanDate = scanDate
-    ? new Date(scanDate).toLocaleDateString(
-        undefined,
-        {
-          month: "short",
-          day: "numeric",
-          year: "numeric",
-        },
-      )
+    ? new Date(scanDate).toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
     : null;
 
-  const scoreLabel =
-    healthScore === null
-      ? "—"
-      : healthScore;
+  const scoreLabel = healthScore === null ? "—" : healthScore;
 
   const priorityCopy =
     priorityIssues.length > 0
@@ -775,22 +531,17 @@ export default function Index() {
             </h1>
 
             <p>
-              Scan your Shopify catalog for missing,
-              incomplete, or inconsistent product data —
-              then see exactly what needs attention first.
+              Scan your Shopify catalog for missing, incomplete, or inconsistent
+              product data — then see exactly what needs attention first.
             </p>
           </div>
 
           <div className="header-action">
             <s-link href="/app/scan">
-              <s-button variant="primary">
-                Scan my catalog
-              </s-button>
+              <s-button variant="primary">Scan my catalog</s-button>
             </s-link>
 
-            <span>
-              No changes are made to your products.
-            </span>
+            <span>No changes are made to your products.</span>
 
             {isDevStore && (
               <div className="dev-tools">
@@ -802,31 +553,19 @@ export default function Index() {
                       setSeedTotalCreated(0);
                     }}
                   >
-                    <input
-                      type="hidden"
-                      name="mode"
-                      value="reset"
-                    />
-
+                    <input type="hidden" name="mode" value="reset" />
                     <s-button
                       type="submit"
                       variant="secondary"
-                      disabled={
-                        isResetting ||
-                        isSeeding
-                      }
+                      disabled={isResetting || isSeeding}
                     >
-                      {isResetting
-                        ? "Resetting…"
-                        : "Reset test catalog"}
+                      {isResetting ? "Resetting…" : "Reset test catalog"}
                     </s-button>
                   </resetFetcher.Form>
 
                   {resetFetcher.data?.success && (
                     <span className="seed-result">
-                      Removed{" "}
-                      {resetFetcher.data.deleted ?? 0}{" "}
-                      test products.
+                      Removed {resetFetcher.data.deleted ?? 0} test products.
                     </span>
                   )}
 
@@ -845,48 +584,29 @@ export default function Index() {
                       setSeedTotalCreated(0);
                     }}
                   >
-                    <input
-                      type="hidden"
-                      name="mode"
-                      value="seed"
-                    />
-
-                    <input
-                      type="hidden"
-                      name="start"
-                      value="0"
-                    />
-
+                    <input type="hidden" name="mode" value="seed" />
+                    <input type="hidden" name="start" value="0" />
                     <s-button
                       type="submit"
                       variant="secondary"
-                      disabled={
-                        isSeeding ||
-                        isResetting
-                      }
+                      disabled={isSeeding || isResetting}
                     >
                       {isSeeding
-                        ? `Creating test catalog… ${
-                            Math.min(
-                              seedStart +
-                                SEED_BATCH_SIZE,
-                              SEED_TOTAL,
-                            )
-                          }/${SEED_TOTAL}`
+                        ? `Creating test catalog… ${Math.min(
+                            seedStart + SEED_BATCH_SIZE,
+                            SEED_TOTAL,
+                          )}/${SEED_TOTAL}`
                         : "Seed 300 test products"}
                     </s-button>
                   </seedFetcher.Form>
 
-                  {seedFetcher.data?.success &&
-                    seedFetcher.data.complete && (
-                      <span className="seed-result">
-                        Created{" "}
-                        {seedTotalCreated +
-                          (seedFetcher.data.created ??
-                            0)}{" "}
-                        test products.
-                      </span>
-                    )}
+                  {seedFetcher.data?.success && seedFetcher.data.complete && (
+                    <span className="seed-result">
+                      Created{" "}
+                      {seedTotalCreated + (seedFetcher.data.created ?? 0)} test
+                      products.
+                    </span>
+                  )}
 
                   {seedFetcher.data?.error && (
                     <span className="seed-error">
@@ -901,15 +621,11 @@ export default function Index() {
 
         <section className="health-overview">
           <div className="health-score">
-            <span className="label">
-              CATALOG HEALTH
-            </span>
-
+            <span className="label">CATALOG HEALTH</span>
             <div className="score-row">
               <strong>{scoreLabel}</strong>
               <span>/ 100</span>
             </div>
-
             <p>
               {hasScan && formattedScanDate
                 ? `Last scanned ${formattedScanDate}`
@@ -917,57 +633,28 @@ export default function Index() {
             </p>
 
             <div className="catalog-count">
-              <span className="label">
-                PRODUCTS IN CATALOG
-              </span>
-
-              <strong>
-                {productCount.toLocaleString()}
-              </strong>
+              <span className="label">PRODUCTS IN CATALOG</span>
+              <strong>{productCount.toLocaleString()}</strong>
             </div>
           </div>
 
           <div className="health-summary">
             <div className="summary-item critical">
               <span>CRITICAL</span>
-
-              <strong>
-                {hasScan
-                  ? issueCounts.critical
-                  : "—"}
-              </strong>
-
-              <p>
-                Issues requiring attention
-              </p>
+              <strong>{hasScan ? issueCounts.critical : "—"}</strong>
+              <p>Issues requiring attention</p>
             </div>
 
             <div className="summary-item high">
               <span>HIGH</span>
-
-              <strong>
-                {hasScan
-                  ? issueCounts.high
-                  : "—"}
-              </strong>
-
-              <p>
-                Important catalog issues
-              </p>
+              <strong>{hasScan ? issueCounts.high : "—"}</strong>
+              <p>Important catalog issues</p>
             </div>
 
             <div className="summary-item medium">
               <span>MEDIUM</span>
-
-              <strong>
-                {hasScan
-                  ? issueCounts.medium
-                  : "—"}
-              </strong>
-
-              <p>
-                Issues worth improving
-              </p>
+              <strong>{hasScan ? issueCounts.medium : "—"}</strong>
+              <p>Issues worth improving</p>
             </div>
           </div>
         </section>
@@ -975,103 +662,58 @@ export default function Index() {
         <section className="priority-section">
           <div className="section-heading">
             <div>
-              <span className="label">
-                FIX THESE FIRST
-              </span>
-
-              <h2>
-                What needs attention first
-              </h2>
+              <span className="label">FIX THESE FIRST</span>
+              <h2>What needs attention first</h2>
             </div>
-
-            <span className="muted">
-              {priorityCopy}
-            </span>
+            <span className="muted">{priorityCopy}</span>
           </div>
 
           {priorityIssues.length > 0 ? (
             <div className="priority-list">
-              {priorityIssues.map(
-                (issue, index) => (
-                  <s-link
-                    key={issue.id}
-                    href={`/app/issues/${issue.id}`}
-                  >
-                    <div className="priority-row">
-                      <div className="priority-index">
-                        {String(index + 1).padStart(
-                          2,
-                          "0",
-                        )}
-                      </div>
-
-                      <div className="priority-copy">
-                        <div className="priority-title">
-                          {issue.title}
-                        </div>
-
-                        <div className="priority-meta">
-                          <span>
-                            {issue.category}
-                          </span>
-
-                          <span
-                            className={`severity ${issue.severity.toLowerCase()}`}
-                          >
-                            {issue.severity}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="priority-count">
-                        <strong>
-                          {issue.affectedCount.toLocaleString()}
-                        </strong>
-
-                        <span>
-                          affected products
+              {priorityIssues.map((issue, index) => (
+                <s-link key={issue.id} href={`/app/issues/${issue.id}`}>
+                  <div className="priority-row">
+                    <div className="priority-index">
+                      {String(index + 1).padStart(2, "0")}
+                    </div>
+                    <div className="priority-copy">
+                      <div className="priority-title">{issue.title}</div>
+                      <div className="priority-meta">
+                        <span>{issue.category}</span>
+                        <span
+                          className={`severity ${issue.severity.toLowerCase()}`}
+                        >
+                          {issue.severity}
                         </span>
                       </div>
-
-                      <div className="priority-arrow">
-                        →
-                      </div>
                     </div>
-                  </s-link>
-                ),
-              )}
+                    <div className="priority-count">
+                      <strong>{issue.affectedCount.toLocaleString()}</strong>
+                      <span>affected products</span>
+                    </div>
+                    <div className="priority-arrow">→</div>
+                  </div>
+                </s-link>
+              ))}
             </div>
           ) : (
             <div className="empty-state">
-              <div className="empty-icon">
-                {hasScan ? "✓" : "+"}
-              </div>
-
+              <div className="empty-icon">{hasScan ? "✓" : "+"}</div>
               <div className="empty-copy">
                 <h3>
                   {hasScan
                     ? "Your catalog looks healthy"
                     : "Run your first catalog scan"}
                 </h3>
-
                 <p>
                   {hasScan
                     ? "No issues were found in your latest scan."
                     : "We’ll check your products for missing, incomplete, and inconsistent data, then rank the issues by impact."}
                 </p>
               </div>
-
-              <s-link
-                href={
-                  hasScan
-                    ? "/app/issues"
-                    : "/app/scan"
-                }
-              >
+              <s-link href={hasScan ? "/app/issues" : "/app/scan"}>
                 <s-button variant="primary">
-                  {hasScan
-                    ? "View issues"
-                    : "Start scan"}
+                  {hasScan ? "View issues" : "Start scan"}
                 </s-button>
               </s-link>
             </div>
@@ -1080,14 +722,10 @@ export default function Index() {
           {priorityIssues.length > 0 && (
             <div className="priority-footer">
               <span>
-                {totalIssues} issue
-                {totalIssues === 1 ? "" : "s"} found
-                in your latest scan.
+                {totalIssues} issue{totalIssues === 1 ? "" : "s"} found in your
+                latest scan.
               </span>
-
-              <s-link href="/app/issues">
-                View all issues →
-              </s-link>
+              <s-link href="/app/issues">View all issues →</s-link>
             </div>
           )}
         </section>
@@ -1095,69 +733,34 @@ export default function Index() {
         <section className="checks-section">
           <div className="section-heading">
             <div>
-              <span className="label">
-                WHAT WE CHECK
-              </span>
-
-              <h2>
-                Built around catalog quality
-              </h2>
+              <span className="label">WHAT WE CHECK</span>
+              <h2>Built around catalog quality</h2>
             </div>
           </div>
 
           <div className="checks-grid">
             <div className="check-card">
-              <span className="check-number">
-                01
-              </span>
-
-              <h3>
-                Product information
-              </h3>
-
-              <p>
-                Titles, descriptions, and
-                essential product details.
-              </p>
+              <span className="check-number">01</span>
+              <h3>Product information</h3>
+              <p>Titles, descriptions, and essential product details.</p>
             </div>
 
             <div className="check-card">
-              <span className="check-number">
-                02
-              </span>
-
+              <span className="check-number">02</span>
               <h3>Images</h3>
-
-              <p>
-                Missing or incomplete product
-                imagery.
-              </p>
+              <p>Missing or incomplete product imagery.</p>
             </div>
 
             <div className="check-card">
-              <span className="check-number">
-                03
-              </span>
-
+              <span className="check-number">03</span>
               <h3>Variants</h3>
-
-              <p>
-                Variant-level pricing,
-                inventory, and product data.
-              </p>
+              <p>Variant-level pricing, inventory, and product data.</p>
             </div>
 
             <div className="check-card">
-              <span className="check-number">
-                04
-              </span>
-
+              <span className="check-number">04</span>
               <h3>Identifiers</h3>
-
-              <p>
-                SKUs and other important
-                catalog identifiers.
-              </p>
+              <p>SKUs and other important catalog identifiers.</p>
             </div>
           </div>
         </section>

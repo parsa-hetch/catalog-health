@@ -11,73 +11,102 @@ datasource db {
   url      = env("NETLIFY_DB_URL")
 }
 
+enum ScanStatus {
+  QUEUED
+  FETCHING
+  ANALYZING
+  CALCULATING
+  PERSISTING
+  COMPLETED
+  FAILED
+}
+
+enum Severity {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+  INFO
+}
+
+enum IssueCategory {
+  PRODUCT_INFORMATION
+  MEDIA
+  SEO
+  INVENTORY
+  VARIANTS
+}
+
 model Session {
-  id                   String    @id
-  shop                 String
-  state                String
-  isOnline             Boolean   @default(false)
-  scope                String?
-  expires              DateTime?
-  accessToken          String
-  userId               BigInt?
-  firstName            String?
-  lastName             String?
-  email                String?
-  accountOwner         Boolean   @default(false)
-  locale               String?
-  collaborator         Boolean?  @default(false)
-  emailVerified        Boolean?  @default(false)
-  refreshToken         String?
-  refreshTokenExpires  DateTime?
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
 }
 
 model Scan {
-  id                 String   @id
-  shop               String
-  status             String   @default("COMPLETED")
-  productCount       Int      @default(0)
-healthScore        Int?
-  missingTitle       Int      @default(0)
-  missingDescription Int      @default(0)
-  missingImage       Int      @default(0)
-  missingSku         Int      @default(0)
-  createdAt          DateTime @default(now())
-  completedAt        DateTime?
+  id           String     @id @default(uuid())
+  shop         String
+  status       ScanStatus @default(QUEUED)
+  productCount Int        @default(0)
+  healthScore  Int?       // Nullable until CALCULATING step finishes
+  errorMessage String?    // Populated if status becomes FAILED
 
-  issues             Issue[]
+  createdAt   DateTime  @default(now())
+  startedAt   DateTime?
+  completedAt DateTime?
+
+  issues Issue[]
 
   @@index([shop, createdAt])
+  @@index([shop, status])
 }
 
 model Issue {
-  id              String   @id
-  scanId          String
-  ruleId          String
-  category        String
-  severity        String
-  title           String
-  description     String
-  whyItMatters    String
-  howToFix        String
-  affectedCount   Int      @default(0)
-  createdAt       DateTime @default(now())
+  id            String        @id @default(uuid())
+  scanId        String
+  ruleId        String        // e.g. "missing_title", "missing_description"
+  category      IssueCategory @default(PRODUCT_INFORMATION)
+  severity      Severity      @default(MEDIUM)
+  title         String
+  description   String
+  whyItMatters  String
+  howToFix      String
+  affectedCount Int           @default(0)
+  createdAt     DateTime      @default(now())
 
-  scan            Scan           @relation(fields: [scanId], references: [id], onDelete: Cascade)
-  instances       IssueInstance[]
+  scan      Scan            @relation(fields: [scanId], references: [id], onDelete: Cascade)
+  instances IssueInstance[]
 
+  @@unique([scanId, ruleId]) // Each scan has at most one aggregated Issue record per rule
   @@index([scanId])
   @@index([ruleId])
   @@index([severity])
 }
 
 model IssueInstance {
-  id           String   @id
-  issueId     String
-  productId   String
+  id           String   @id @default(uuid())
+  issueId      String
+  productId    String
   productTitle String
-  createdAt   DateTime @default(now())
+  variantId    String?
+  metadata     Json?    // Flexible payload for rule-specific debug context
+  createdAt    DateTime @default(now())
 
-  issue        Issue   @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  issue Issue @relation(fields: [issueId], references: [id], onDelete: Cascade)
 
   @@index([issueId])
   @@index([productId])
