@@ -1,0 +1,2 @@
+ALTER TABLE "Scan"
+ADD COLUMN "healthScore" INTEGER;

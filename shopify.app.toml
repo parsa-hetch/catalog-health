@@ -2,22 +2,21 @@
 
 client_id = "1f23163370ae57e88ac176342195bcc6"
 name = "catalog-health"
-application_url = "https://shopify.dev/apps/default-app-home"
+application_url = "https://catalog-health.netlify.app"
 embedded = true
 
 [build]
 automatically_update_urls_on_dev = true
-include_config_on_deploy = true
 
 [webhooks]
 api_version = "2026-10"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,write_products"
+scopes = "read_products,write_products,write_inventory"
 
 [auth]
-redirect_urls = [ "https://shopify.dev/apps/default-app-home/api/auth" ]
+redirect_urls = [ "https://catalog-health.netlify.app/auth/callback" ]
 
 [product.metafields.app.demo_info]
 type = "single_line_text_field"
