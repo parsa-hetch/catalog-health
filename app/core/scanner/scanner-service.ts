@@ -16,7 +16,7 @@ export class ScannerService {
   }
 
   /**
-   * محاسبه واقع‌بینانه Health Score بر اساس درصد محصولات درگیر و شدت خطاها
+   * محاسبه واقع‌بینانه Health Score بر اساس درصد محصولات درگیر و وزن خطاها
    */
   private static calculateRealHealthScore(
     totalProducts: number,
@@ -24,12 +24,11 @@ export class ScannerService {
   ): number {
     if (totalProducts === 0) return 100;
 
-    // وزن جریمه به ازای هر دسته شدت (Severity)
     const SEVERITY_WEIGHTS: Record<string, number> = {
-      CRITICAL: 20,
-      HIGH: 12,
-      MEDIUM: 6,
-      LOW: 3,
+      CRITICAL: 25,
+      HIGH: 15,
+      MEDIUM: 8,
+      LOW: 4,
       INFO: 1,
     };
 
@@ -43,14 +42,12 @@ export class ScannerService {
       const severity = ruleDef?.severity || "MEDIUM";
       const weight = SEVERITY_WEIGHTS[severity] || 5;
 
-      // نسبت محصولات درگیر ضرب در وزن خطا
+      // محاسبه جریمه بر اساس درصد کاتالوگ درگیر
       const percentageAffected = affectedCount / totalProducts;
-      totalDeductions += percentageAffected * weight;
+      totalDeductions += percentageAffected * weight * 3;
     }
 
-    // نرمال‌سازی نمره نهایی بین ۰ تا ۱۰۰
-    const finalScore = Math.max(0, Math.min(100, Math.round(100 - totalDeductions)));
-    return finalScore;
+    return Math.max(0, Math.min(100, Math.round(100 - totalDeductions)));
   }
 
   /**
@@ -64,6 +61,7 @@ export class ScannerService {
         data: { status: "FETCHING", startedAt: new Date() },
       });
 
+      // Fetch با تمام دیتای مورد نیاز برای Rule Engine
       const response = await shopifyGraphQLClient.query({
         data: `{
           products(first: 250) {
@@ -71,9 +69,19 @@ export class ScannerService {
               node {
                 id
                 title
+                status
                 descriptionHtml
                 images(first: 10) { edges { node { id } } }
-                variants(first: 10) { edges { node { id sku price } } }
+                variants(first: 10) {
+                  edges {
+                    node {
+                      id
+                      sku
+                      price
+                      inventoryQuantity
+                    }
+                  }
+                }
               }
             }
           }
@@ -94,7 +102,7 @@ export class ScannerService {
 
       const ruleResults = RuleEngine.analyzeBatch(normalizedProducts);
 
-      // 3. UPDATE STATE: CALCULATING (Realistic Health Score)
+      // 3. UPDATE STATE: CALCULATING
       await prisma.scan.update({
         where: { id: scanId },
         data: { status: "CALCULATING" },
@@ -109,6 +117,11 @@ export class ScannerService {
       await prisma.scan.update({
         where: { id: scanId },
         data: { status: "PERSISTING" },
+      });
+
+      // پاک کردن خطاهای اسکن قبلی برای جلوگیری از هم‌پوشانی
+      await prisma.issue.deleteMany({
+        where: { scanId },
       });
 
       for (const result of ruleResults) {
