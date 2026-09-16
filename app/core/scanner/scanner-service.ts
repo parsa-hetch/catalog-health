@@ -16,7 +16,45 @@ export class ScannerService {
   }
 
   /**
-   * موتور اصلی اسکن: محصولات را Fetch می‌کند، به Rule Engine می‌دهد و نتایج را Aggregation و Persist می‌کند.
+   * محاسبه واقع‌بینانه Health Score بر اساس درصد محصولات درگیر و شدت خطاها
+   */
+  private static calculateRealHealthScore(
+    totalProducts: number,
+    ruleResults: Array<{ ruleId: string; affectedProducts: any[] }>
+  ): number {
+    if (totalProducts === 0) return 100;
+
+    // وزن جریمه به ازای هر دسته شدت (Severity)
+    const SEVERITY_WEIGHTS: Record<string, number> = {
+      CRITICAL: 20,
+      HIGH: 12,
+      MEDIUM: 6,
+      LOW: 3,
+      INFO: 1,
+    };
+
+    let totalDeductions = 0;
+
+    for (const result of ruleResults) {
+      const affectedCount = result.affectedProducts.length;
+      if (affectedCount === 0) continue;
+
+      const ruleDef = RULES.find((r) => r.id === result.ruleId);
+      const severity = ruleDef?.severity || "MEDIUM";
+      const weight = SEVERITY_WEIGHTS[severity] || 5;
+
+      // نسبت محصولات درگیر ضرب در وزن خطا
+      const percentageAffected = affectedCount / totalProducts;
+      totalDeductions += percentageAffected * weight;
+    }
+
+    // نرمال‌سازی نمره نهایی بین ۰ تا ۱۰۰
+    const finalScore = Math.max(0, Math.min(100, Math.round(100 - totalDeductions)));
+    return finalScore;
+  }
+
+  /**
+   * موتور اصلی اسکن
    */
   static async runScan(scanId: string, shopifyGraphQLClient: any) {
     try {
@@ -26,7 +64,6 @@ export class ScannerService {
         data: { status: "FETCHING", startedAt: new Date() },
       });
 
-      // نمونه Query شاپفای (می‌توان بعداً Pagination اضافه کرد)
       const response = await shopifyGraphQLClient.query({
         data: `{
           products(first: 250) {
@@ -36,7 +73,7 @@ export class ScannerService {
                 title
                 descriptionHtml
                 images(first: 10) { edges { node { id } } }
-                variants(first: 10) { edges { node { id sku } } }
+                variants(first: 10) { edges { node { id sku price } } }
               }
             }
           }
@@ -55,21 +92,18 @@ export class ScannerService {
         },
       });
 
-      // اجرای Rule Engine به صورت Pure
       const ruleResults = RuleEngine.analyzeBatch(normalizedProducts);
 
-      // 3. UPDATE STATE: CALCULATING (Health Score)
+      // 3. UPDATE STATE: CALCULATING (Realistic Health Score)
       await prisma.scan.update({
         where: { id: scanId },
         data: { status: "CALCULATING" },
       });
 
-      // محاسبه ساده Health Score (MVP)
-      const totalRules = RULES.length;
-      const failedRulesCount = ruleResults.filter((r) => r.affectedProducts.length > 0).length;
-      const healthScore = totalRules > 0 
-        ? Math.max(0, Math.round(((totalRules - failedRulesCount) / totalRules) * 100))
-        : 100;
+      const healthScore = this.calculateRealHealthScore(
+        normalizedProducts.length,
+        ruleResults
+      );
 
       // 4. UPDATE STATE: PERSISTING (Save Issues & Instances)
       await prisma.scan.update({
@@ -83,7 +117,6 @@ export class ScannerService {
         const ruleDef = RULES.find((r) => r.id === result.ruleId);
         if (!ruleDef) continue;
 
-        // ذخیره Issue و IssueInstance به‌صورت Cascaded
         await prisma.issue.create({
           data: {
             scanId,
@@ -116,7 +149,6 @@ export class ScannerService {
         },
       });
     } catch (error: any) {
-      // TERMINAL STATE: FAILED
       return await prisma.scan.update({
         where: { id: scanId },
         data: {
