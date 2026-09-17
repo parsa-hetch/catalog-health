@@ -7,7 +7,7 @@ import {
 } from "react-router";
 
 import { authenticate } from "../shopify.server";
-import { prisma } from "../db.server";
+import prisma from "../db.server";
 
 const DEV_STORE = "catalog-health-dev-tzeqhgzu.myshopify.com";
 
@@ -45,90 +45,116 @@ type GraphQLUserError = {
 };
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin, session } = await authenticate.admin(request);
+  try {
+    const { admin, session } = await authenticate.admin(request);
 
-  const response = await admin.graphql(`#graphql
-    query CatalogOverview {
-      productsCount {
-        count
-      }
-    }
-  `);
-
-  const data = await response.json();
-
-  const latestScan = await prisma.scan.findFirst({
-    where: {
-      shop: session.shop,
-    },
-    orderBy: {
-      createdAt: "desc",
-    },
-    include: {
-      issues: {
-        select: {
-          id: true,
-          title: true,
-          category: true,
-          severity: true,
-          affectedCount: true,
-        },
-      },
-    },
-  });
-
-  const criticalCount =
-    latestScan?.issues.filter(
-      (issue) => issue.severity === "CRITICAL",
-    ).length ?? 0;
-
-  const highCount =
-    latestScan?.issues.filter(
-      (issue) => issue.severity === "HIGH",
-    ).length ?? 0;
-
-  const mediumCount =
-    latestScan?.issues.filter(
-      (issue) => issue.severity === "MEDIUM",
-    ).length ?? 0;
-
-  const priorityIssues: PriorityIssue[] =
-    latestScan?.issues
-      .slice()
-      .sort((a, b) => {
-        const severityWeight: Record<string, number> = {
-          CRITICAL: 4,
-          HIGH: 3,
-          MEDIUM: 2,
-          LOW: 1,
-        };
-
-        const severityDifference =
-          (severityWeight[b.severity] ?? 0) -
-          (severityWeight[a.severity] ?? 0);
-
-        if (severityDifference !== 0) {
-          return severityDifference;
+    let productCount = 0;
+    try {
+      const response = await admin.graphql(`#graphql
+        query CatalogOverview {
+          productsCount {
+            count
+          }
         }
+      `);
+      const data = await response.json();
+      productCount = data?.data?.productsCount?.count ?? 0;
+    } catch (gqlErr) {
+      console.error("Failed to fetch product count from Shopify GraphQL:", gqlErr);
+    }
 
-        return b.affectedCount - a.affectedCount;
-      })
-      .slice(0, 3) ?? [];
+    let latestScan = null;
+    try {
+      latestScan = await prisma.scan.findFirst({
+        where: {
+          shop: session.shop,
+        },
+        orderBy: {
+          createdAt: "desc",
+        },
+        include: {
+          issues: {
+            select: {
+              id: true,
+              title: true,
+              category: true,
+              severity: true,
+              affectedCount: true,
+            },
+          },
+        },
+      });
+    } catch (dbErr) {
+      console.error("Failed to query latest scan from Prisma:", dbErr);
+    }
 
-  return {
-    productCount: data.data?.productsCount?.count ?? 0,
-    healthScore: latestScan?.healthScore ?? null,
-    scanDate: latestScan?.createdAt?.toISOString() ?? null,
-    issueCounts: {
-      critical: criticalCount,
-      high: highCount,
-      medium: mediumCount,
-    },
-    priorityIssues,
-    totalIssues: latestScan?.issues.length ?? 0,
-    hasScan: Boolean(latestScan),
-    isDevStore: session.shop === DEV_STORE,
-  };
+    const criticalCount =
+      latestScan?.issues.filter(
+        (issue) => issue.severity === "CRITICAL",
+      ).length ?? 0;
+
+    const highCount =
+      latestScan?.issues.filter(
+        (issue) => issue.severity === "HIGH",
+      ).length ?? 0;
+
+    const mediumCount =
+      latestScan?.issues.filter(
+        (issue) => issue.severity === "MEDIUM",
+      ).length ?? 0;
+
+    const priorityIssues: PriorityIssue[] =
+      latestScan?.issues
+        .slice()
+        .sort((a, b) => {
+          const severityWeight: Record<string, number> = {
+            CRITICAL: 4,
+            HIGH: 3,
+            MEDIUM: 2,
+            LOW: 1,
+          };
+
+          const severityDifference =
+            (severityWeight[b.severity] ?? 0) -
+            (severityWeight[a.severity] ?? 0);
+
+          if (severityDifference !== 0) {
+            return severityDifference;
+          }
+
+          return b.affectedCount - a.affectedCount;
+        })
+        .slice(0, 3) ?? [];
+
+    return {
+      productCount,
+      healthScore: latestScan?.healthScore ?? null,
+      scanDate: latestScan?.createdAt?.toISOString() ?? null,
+      issueCounts: {
+        critical: criticalCount,
+        high: highCount,
+        medium: mediumCount,
+      },
+      priorityIssues,
+      totalIssues: latestScan?.issues.length ?? 0,
+      hasScan: Boolean(latestScan),
+      isDevStore: session.shop === DEV_STORE,
+      error: null,
+    };
+  } catch (err: any) {
+    console.error("Unhandled error in loader:", err);
+    return {
+      productCount: 0,
+      healthScore: null,
+      scanDate: null,
+      issueCounts: { critical: 0, high: 0, medium: 0 },
+      priorityIssues: [],
+      totalIssues: 0,
+      hasScan: false,
+      isDevStore: false,
+      error: err?.message || "An unexpected error occurred while loading catalog data.",
+    };
+  }
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -450,6 +476,8 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Index() {
+  const loaderData = useLoaderData<typeof loader>();
+  
   const {
     productCount,
     healthScore,
@@ -459,7 +487,8 @@ export default function Index() {
     totalIssues,
     hasScan,
     isDevStore,
-  } = useLoaderData<typeof loader>();
+    error,
+  } = loaderData;
 
   const seedFetcher = useFetcher<SeedResult>();
   const resetFetcher = useFetcher<SeedResult>();
@@ -517,6 +546,12 @@ export default function Index() {
   return (
     <s-page heading="Catalog Health">
       <div className="catalog-health">
+        {error && (
+          <div className="system-error-banner">
+            <strong>System Notice:</strong> {error}
+          </div>
+        )}
+
         <section className="dashboard-header">
           <div className="header-copy">
             <div className="eyebrow">
@@ -771,6 +806,16 @@ export default function Index() {
           max-width: 1180px;
           margin: 32px auto 80px;
           color: #183030;
+        }
+
+        .system-error-banner {
+          margin-bottom: 24px;
+          padding: 14px 20px;
+          border-radius: 10px;
+          background-color: #fcf1f0;
+          border: 1px solid #f5c6cb;
+          color: #721c24;
+          font-size: 13px;
         }
 
         .dashboard-header {
