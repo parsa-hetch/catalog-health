@@ -39,7 +39,7 @@ if (host === "localhost") {
 
 export default defineConfig({
   server: {
-    allowedHosts: [host],
+    allowedHosts: true, // این تغییر اجازه می‌دهد هر دامنه تونلی (مثل localtunnel) بدون بلاک شدن باز شود
     cors: {
       preflightContinue: true,
     },
