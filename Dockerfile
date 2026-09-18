@@ -1,18 +1,24 @@
 FROM node:20-alpine
-RUN apk add --no-cache openssl
-
-EXPOSE 3000
 
 WORKDIR /app
 
-ENV NODE_ENV=production
+# کپی فایل‌های پکیج
+COPY package*.json ./
+COPY prisma ./prisma/
 
-COPY package.json package-lock.json* ./
+# نصب وابستگی‌ها
+RUN npm ci --legacy-peer-deps
 
-RUN npm ci --omit=dev && npm cache clean --force
-
+# کپی سورس‌کد پروژه
 COPY . .
 
+# بیلد پروژه و ساخت کلاینت پریزما
+RUN npx prisma generate
 RUN npm run build
 
-CMD ["npm", "run", "docker-start"]
+EXPOSE 3000
+
+ENV PORT=3000
+ENV NODE_ENV=production
+
+CMD ["npm", "run", "start"]
