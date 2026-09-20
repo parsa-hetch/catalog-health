@@ -17,22 +17,24 @@ export const headers: HeadersFunction = (headersArgs) => {
   return boundary.headers(headersArgs);
 };
 
-// کامپوننت جدید برای شکار خطای دقیق
 export function ErrorBoundary() {
-  const error = useRouteError();
-  
-  // ثبت خطا در لاگ‌های سرور پاستا
-  console.error("🔥 SHOPIFY OAUTH FATAL ERROR:", error);
+  const error = useRouteError() as any;
 
-  // نمایش خطای واقعی روی صفحه مرورگر به جای [object Object]
+  // اگر شاپیفای اسکریپتِ ریدارکت App Bridge را پرتاب کرده باشد، ما آن را مستقیماً در HTML رندر می‌کنیم تا مرورگر آن را اجرا کند
+  if (error && error.data && typeof error.data === "string" && error.data.includes("app-bridge.js")) {
+    return (
+      <div dangerouslySetInnerHTML={{ __html: error.data }} />
+    );
+  }
+
+  // نمایش سایر خطاهای احتمالی
   return (
     <div style={{ padding: "2rem", color: "red", fontFamily: "monospace", direction: "ltr" }}>
-      <h2>OAuth Authentication Error</h2>
-      <pre style={{ background: "#f8d7da", padding: "1rem", borderRadius: "5px", overflow: "auto" }}>
+      <h2>Unhandled Error</h2>
+      <pre>
         {error instanceof Error 
-          ? `${error.name}: ${error.message}\n\n${error.stack}`
-          : JSON.stringify(error, null, 2)
-        }
+          ? `${error.name}: ${error.message}`
+          : JSON.stringify(error, null, 2)}
       </pre>
     </div>
   );
