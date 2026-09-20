@@ -2,9 +2,9 @@
 
 client_id = "1f23163370ae57e88ac176342195bcc6"
 name = "catalog-health"
-handle = "catalog-health-4"
 application_url = "https://catalog-health.neda1.paasta.app"
 embedded = true
+handle = "catalog-health-4"
 
 [build]
 automatically_update_urls_on_dev = false
@@ -14,7 +14,7 @@ api_version = "2026-10"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products,write_products,write_inventory"
+scopes = "read_products,write_inventory,write_products"
 
 [auth]
 redirect_urls = [
